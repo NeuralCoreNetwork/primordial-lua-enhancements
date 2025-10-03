@@ -1,5 +1,5 @@
--- локалы
-local allnigga = {}ffi = require "ffi" Discord = require("webhook")
+-- locals
+local allnigga = {}ffi = require "ffi" Discord = require('webhook')
 
 local ticks = 0
 engine.play_sound("primordial.wav", 1.0, 100)
@@ -21,7 +21,16 @@ local player_data = {}
 local resolver_confidence = {}
 local miss_counters = {}
 local soft_point_active = {}
-callbacks_add, client_get_fps, client_get_local_time, color_t, engine_get_choked_commands, engine_get_latency, engine_is_connected, entity_list_get_entity, entity_list_get_local_player, get_charge, global_vars_max_clients, input_get_mouse_pos, input_is_key_held, input_is_mouse_in_bounds, kb.handle, math_max, math_min, menu_add_checkbox, menu_add_multi_selection, menu_add_selection, menu_add_slider, menu_add_text_input, menu_find, menu_is_open, render_get_screen_size, pairs, render_create_font, render_get_text_size, render_pop_alpha_modifier, render_push_alpha_modifier, render_rect, render.rect_fade, render_rect_fade_round_box, render_rect_filled, render_ui, setmetatable, table_count, table_insert, vec2_t, type, tostring = callbacks.add, client.get_fps, client.get_local_time, color_t, engine.get_choked_commands, engine.get_latency, engine.is_connected, entity_list.get_entity, entity_list.get_local_player, exploits.get_charge, global_vars.max_clients, input.get_mouse_pos, input.is_key_held, input.is_mouse_in_bounds, kb.handle, math.max, math.min, menu.add_checkbox, menu.add_multi_selection, menu.add_selection, menu.add_slider, menu.add_text_input, menu.find, menu.is_open, render.get_screen_size, pairs, render.create_font, render.get_text_size, render.pop_alpha_modifier, render.push_alpha_modifier, render.rect, render.rect_fade, render.rect_fade_round_box, render.rect_filled, render.ui, setmetatable, table.count, table.insert, vec2_t, type, tostring
+
+callbacks_add, client_get_fps, client_get_local_time, color_t, engine_get_choked_commands, engine_get_latency, engine_is_connected, entity_list_get_entity, entity_list_get_local_player, get_charge, global_vars_max_clients, input_get_mouse_pos, input_is_key_held, input_is_mouse_in_bounds, kb_handle, math_max, math_min, menu_add_checkbox, menu_add_multi_selection, menu_add_selection, menu_add_slider, menu_add_text_input, menu_find, menu_is_open, render_get_screen_size, pairs, render_create_font, render_get_text_size, render_pop_alpha_modifier, render_push_alpha_modifier, render_rect, render_rect_fade, render_rect_fade_round_box, render_rect_filled, render_ui, setmetatable, table_count, table_insert, vec2_t, type, tostring = callbacks.add, client.get_fps, client.get_local_time, color_t, engine.get_choked_commands, engine.get_latency, engine.is_connected, entity_list.get_entity, entity_list.get_local_player, exploits.get_charge, global_vars.max_clients, input.get_mouse_pos, input.is_key_held, input.is_mouse_in_bounds, kb.handle, math.max, math.min, menu.add_checkbox, menu.add_multi_selection, menu.add_selection, menu.add_slider, menu.add_text_input, menu.find, menu.is_open, render.get_screen_size, pairs, render.create_font, render.get_text_size, render.pop_alpha_modifier, render.push_alpha_modifier, render.rect, render.rect_fade, render.rect_fade_round_box, render.rect_filled, render.ui, setmetatable, table.count, table.insert, vec2_t, type, tostring
+
+-- UI Elements
+local adaptive_resolver_enable = menu.add_checkbox("aimbot", "general", "aimbot", "Adaptive Resolver", false)
+local adaptive_resolver_type = menu.add_multi_selection("aimbot", "general", "aimbot", "Resolver Type", {"Bruteforce", "Predictive", "Static", "Jitter", "Spin"})
+local resolver_confidence_display = menu.add_slider("aimbot", "general", "aimbot", "Resolver Confidence", 0, 100, 0, "%")
+local miss_threshold = menu.add_slider("aimbot", "general", "aimbot", "Misses for Soft Point", 0, 10, 3, "misses")
+local soft_point_bodyparts = menu.add_multi_selection("aimbot", "general", "aimbot", "Soft Point Bodyparts", {"Head", "Chest", "Stomach", "Arms", "Legs"})
+local current_miss_count = menu.add_slider("aimbot", "general", "aimbot", "Current Miss Count", 0, 10, 0, "misses")
 
 function anim.lerp(a,b,p) 
 	return a + (b - a) *p 
@@ -62,6 +71,90 @@ end
 local function on_draw_watermark(watermark_text)
         local maxim = cvars["name"]:get_string()
         return "rinnegan ~ " .. maxim
+end
+
+-- Helper functions for new features
+local helpers = {}
+
+function helpers.update_confidence(player_index, success)
+    if not resolver_confidence[player_index] then
+        resolver_confidence[player_index] = 50
+    end
+
+    if success then
+        resolver_confidence[player_index] = math.min(100, resolver_confidence[player_index] + 10)
+    else
+        resolver_confidence[player_index] = math.max(0, resolver_confidence[player_index] - 10)
+    end
+    resolver_confidence_display:set(resolver_confidence[player_index])
+end
+
+function helpers.update_miss_counter(player_index, reset)
+    if not miss_counters[player_index] then
+        miss_counters[player_index] = 0
+    end
+
+    if reset then
+        miss_counters[player_index] = 0
+    else
+        miss_counters[player_index] = miss_counters[player_index] + 1
+    end
+    current_miss_count:set(miss_counters[player_index])
+end
+
+function helpers.is_soft_point_active(player_index)
+    if not miss_counters[player_index] then
+        return false
+    end
+
+    return miss_counters[player_index] >= miss_threshold:get()
+end
+
+-- Main resolver logic
+function allnigga.C_ResolverInstance(ctx, entity)
+    if not adaptive_resolver_enable:get() then
+        return
+    end
+
+    local player_index = entity:get_index()
+
+    -- Update data on player hurt event
+    callbacks.add(e_callbacks.PLAYER_HURT, function(event)
+        local attacker = entity_list.get_entity(engine.get_player_for_user_id(event.attacker))
+        if attacker and attacker:is_local_player() then
+            helpers.update_confidence(player_index, true)
+            helpers.update_miss_counter(player_index, true)
+        end
+    end)
+
+    -- Update data on bullet impact event
+    callbacks.add(e_callbacks.BULLET_IMPACT, function(event)
+        local attacker = entity_list.get_entity(engine.get_player_for_user_id(event.userid))
+        if attacker and attacker:is_local_player() then
+            helpers.update_confidence(player_index, false)
+            helpers.update_miss_counter(player_index, false)
+        end
+    end)
+
+    -- Soft point logic
+    if helpers.is_soft_point_active(player_index) then
+        local selected_bodyparts = soft_point_bodyparts:get()
+        -- Logic to force soft points based on selected bodyparts
+        -- This is a placeholder for the actual implementation
+        -- For example: aimbot.force_hitbox(entity, selected_bodyparts[1])
+    end
+
+    -- Adaptive resolver type switching
+    local resolver_types = adaptive_resolver_type:get()
+    local current_resolver_index = 1
+    if resolver_confidence[player_index] and resolver_confidence[player_index] < 30 then
+        current_resolver_index = (current_resolver_index % #resolver_types) + 1
+    end
+
+    -- Apply the selected resolver type
+    -- This is a placeholder for the actual implementation
+    -- For example: resolver.set_mode(entity, resolver_types[current_resolver_index])
+end
 end
 
 callbacks.add(e_callbacks.DRAW_WATERMARK, on_draw_watermark)
